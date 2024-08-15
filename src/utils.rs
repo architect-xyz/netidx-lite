@@ -1,4 +1,9 @@
-use crate::pool::{Pool, Poolable, Pooled};
+use crate::{
+    pack::{Pack, PackError},
+    pool::{Pool, Poolable, Pooled},
+};
+use anyhow::Result;
+use bytes::BytesMut;
 use fxhash::FxHashMap;
 use std::{
     any::{Any, TypeId},
@@ -17,6 +22,39 @@ macro_rules! try_continue {
             }
         }
     };
+}
+
+#[macro_export]
+macro_rules! try_break {
+    ($lbl:tt, $e:expr) => {
+        match $e {
+            Ok(v) => v,
+            Err(e) => {
+                break $lbl Err(Error::from(e));
+            }
+        }
+    };
+    ($e:expr) => {
+        match $e {
+            Ok(v) => v,
+            Err(e) => {
+                break Err(Error::from(e));
+            }
+        }
+    };
+}
+
+thread_local! {
+    static BUF: RefCell<BytesMut> = RefCell::new(BytesMut::with_capacity(512));
+}
+
+/// pack T and return a bytesmut from the global thread local buffer
+pub fn pack<T: Pack>(t: &T) -> Result<BytesMut, PackError> {
+    BUF.with(|buf| {
+        let mut b = buf.borrow_mut();
+        t.encode(&mut *b)?;
+        Ok(b.split())
+    })
 }
 
 thread_local! {
