@@ -1,0 +1,27 @@
+[package]
+name = "netidx-lite-pack"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+derive = ["pack_derive"]
+
+# CR alee: make the following optional
+# arcstr
+# chrono
+# enumflags2
+# rust_decimal
+# uuid
+
+[dependencies]
+anyhow = { workspace = true }
+arcstr = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+enumflags2 = { workspace = true }
+indexmap = { workspace = true }
+pack_derive = { package = "netidx-lite-pack-derive", version = "0.1.0", path = "./derive", optional = true }
+pool = { package = "netidx-lite-pool", version = "0.1.0", path = "../pool" }
+rust_decimal = { workspace = true }
+smallvec = { workspace = true }
+uuid = { workspace = true }

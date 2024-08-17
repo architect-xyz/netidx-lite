@@ -1,0 +1,13 @@
+[package]
+name = "netidx-lite-pool"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+crossbeam = { workspace = true }
+fxhash = { workspace = true }
+indexmap = { workspace = true }
+once_cell = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+triomphe = { workspace = true }

@@ -19,6 +19,8 @@ use std::{
 };
 use triomphe::Arc as TArc;
 
+pub mod utils;
+
 pub trait Poolable {
     fn empty() -> Self;
     fn reset(&mut self);

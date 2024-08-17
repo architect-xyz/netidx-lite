@@ -112,9 +112,6 @@ name = "arcstr"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03918c3dbd7701a85c6b9887732e2921175f26c350b4563841d0958c21d57e6d"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "arrayvec"
@@ -142,12 +139,6 @@ dependencies = [
  "object",
  "rustc-demangle",
 ]
-
-[[package]]
-name = "base64"
-version = "0.22.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bitflags"
@@ -230,15 +221,12 @@ name = "bytes"
 version = "1.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8318a53db07bb3f8dca91a600466bdb3f2eaadeedfdbcf02e1accbad9271ba50"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "cc"
-version = "1.1.13"
+version = "1.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72db2f7947ecee9b03b510377e8bb9077afa27176fdbff55c51027e976fdcc48"
+checksum = "68064e60dbf1f17005c2fde4d07c16d8baa506fd7ffed8ccab702d93617975c7"
 dependencies = [
  "shlex",
 ]
@@ -265,16 +253,15 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
- "serde",
  "wasm-bindgen",
  "windows-targets",
 ]
 
 [[package]]
 name = "clap"
-version = "4.5.16"
+version = "4.5.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed6719fffa43d0d87e5fd8caeab59be1554fb028cd30edc88fc4369b17971019"
+checksum = "11d8838454fda655dafd3accb2b6e2bea645b9e4078abe84a22ceb947235c5cc"
 dependencies = [
  "clap_builder",
 ]
@@ -302,16 +289,6 @@ name = "colorchoice"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fd119d74b830634cea2a0f58bbd0d54540518a14397557951e79340abc28c0"
-
-[[package]]
-name = "combine"
-version = "4.6.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba5a308b75df32fe02788e748662718f03fde005016435c444eea572398219fd"
-dependencies = [
- "bytes",
- "memchr",
-]
 
 [[package]]
 name = "core-foundation-sys"
@@ -634,9 +611,9 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "libc"
-version = "0.2.156"
+version = "0.2.155"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5f43f184355eefb8d17fc948dbecf6c13be3c141f20d834ae842193a448c72a"
+checksum = "97b3888a4aecf77e811145cadf6eef5901f4782c53886191b2f693f24761847c"
 
 [[package]]
 name = "lock_api"
@@ -687,12 +664,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arcstr",
- "base64",
  "byteorder",
  "bytes",
  "chrono",
  "clap",
- "combine",
  "crossbeam",
  "enumflags2",
  "env_logger",
@@ -701,8 +676,6 @@ dependencies = [
  "indexmap",
  "lazy_static",
  "log",
- "netidx-lite-pack",
- "netidx-lite-pool",
  "once_cell",
  "parking_lot",
  "rust_decimal",
@@ -711,45 +684,6 @@ dependencies = [
  "tokio",
  "triomphe",
  "uuid",
-]
-
-[[package]]
-name = "netidx-lite-pack"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arcstr",
- "bytes",
- "chrono",
- "enumflags2",
- "indexmap",
- "netidx-lite-pack-derive",
- "netidx-lite-pool",
- "rust_decimal",
- "smallvec",
- "uuid",
-]
-
-[[package]]
-name = "netidx-lite-pack-derive"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.74",
-]
-
-[[package]]
-name = "netidx-lite-pool"
-version = "0.1.0"
-dependencies = [
- "crossbeam",
- "fxhash",
- "indexmap",
- "once_cell",
- "parking_lot",
- "serde",
- "triomphe",
 ]
 
 [[package]]

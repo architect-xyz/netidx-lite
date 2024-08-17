@@ -1,7 +1,3 @@
-use crate::{
-    pool::{Poolable, Pooled},
-    utils::take_t,
-};
 use arcstr::ArcStr;
 use bytes::{buf, Buf, BufMut, Bytes, BytesMut};
 use chrono::{
@@ -9,6 +5,10 @@ use chrono::{
     prelude::*,
 };
 use indexmap::{IndexMap, IndexSet};
+// re-export derive(Pack)
+#[cfg(feature = "derive")]
+pub use pack_derive::Pack;
+use pool::{utils::take_t, Poolable, Pooled};
 use rust_decimal::Decimal;
 use std::{
     any::Any,
@@ -1405,11 +1405,10 @@ impl Pack for anyhow::Error {
         if len > buf.remaining() {
             Err(PackError::BufferShort)
         } else {
-            let s = match crate::chars::Chars::from_bytes(buf.copy_to_bytes(len)) {
-                Ok(s) => s,
-                Err(_) => return Err(PackError::InvalidFormat),
-            };
-            Ok(anyhow::anyhow!(s))
+            match String::from_utf8(buf.copy_to_bytes(len).to_vec()) {
+                Ok(s) => Ok(anyhow::anyhow!(s)),
+                Err(_) => Err(PackError::InvalidFormat),
+            }
         }
     }
 }
@@ -1425,6 +1424,37 @@ impl<T: Pack> Pack for Box<T> {
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         Ok(Box::new(Pack::decode(buf)?))
+    }
+}
+
+use smallvec::{Array, SmallVec};
+
+impl<A> Pack for SmallVec<A>
+where
+    A: Array,
+    <A as Array>::Item: Pack,
+{
+    fn encoded_len(&self) -> usize {
+        self.iter().fold(varint_len(SmallVec::len(self) as u64), |len, t| {
+            len + Pack::encoded_len(t)
+        })
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        encode_varint(SmallVec::len(self) as u64, buf);
+        for t in self {
+            Pack::encode(t, buf)?
+        }
+        Ok(())
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        let elts = decode_varint(buf)? as usize;
+        let mut data = SmallVec::new();
+        for _ in 0..elts {
+            data.push(Pack::decode(buf)?);
+        }
+        Ok(data)
     }
 }
 

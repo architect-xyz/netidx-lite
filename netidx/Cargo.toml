@@ -1,0 +1,32 @@
+[package]
+name = "netidx-lite"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+arcstr = { workspace = true }
+base64 = { workspace = true }
+byteorder = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+combine = { workspace = true }
+crossbeam = { workspace = true }
+pack = { package = "netidx-lite-pack", version = "0.1.0", path = "../pack", features = ["derive"] }
+pool = { package = "netidx-lite-pool", version = "0.1.0", path = "../pool" }
+enumflags2 = { workspace = true }
+env_logger = { workspace = true }
+futures = { workspace = true }
+fxhash = { workspace = true }
+indexmap = { workspace = true }
+lazy_static = { workspace = true }
+log = { workspace = true }
+once_cell = { workspace = true }
+parking_lot = { workspace = true }
+rust_decimal = { workspace = true }
+serde = { workspace = true }
+smallvec = { workspace = true }
+tokio = { workspace = true }
+triomphe = { workspace = true }
+uuid = { workspace = true }

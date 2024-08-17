@@ -120,7 +120,7 @@ fn flush_task<S: AsyncWrite + Send + 'static>(mut soc: WriteHalf<S>) -> Sender<B
 pub(crate) struct WriteChannel {
     to_flush: Sender<BytesMut>,
     buf: BytesMut,
-    boundries: Vec<usize>,
+    boundaries: Vec<usize>,
 }
 
 impl WriteChannel {
@@ -130,7 +130,7 @@ impl WriteChannel {
         WriteChannel {
             to_flush: flush_task(socket),
             buf: BytesMut::with_capacity(BUF),
-            boundries: Vec::new(),
+            boundaries: Vec::new(),
         }
     }
 
@@ -145,15 +145,15 @@ impl WriteChannel {
             self.buf.reserve(self.buf.capacity());
         }
         let buf_len = self.buf.remaining();
-        if (buf_len - self.boundries.last().copied().unwrap_or(0)) + len > MAX_BATCH {
-            let prev_len: usize = self.boundries.iter().sum();
-            self.boundries.push(buf_len - prev_len);
+        if (buf_len - self.boundaries.last().copied().unwrap_or(0)) + len > MAX_BATCH {
+            let prev_len: usize = self.boundaries.iter().sum();
+            self.boundaries.push(buf_len - prev_len);
         }
         match msg.encode(&mut self.buf) {
             Ok(()) => Ok(()),
             Err(e) => {
                 self.buf.resize(buf_len, 0x0);
-                self.boundries.pop();
+                self.boundaries.pop();
                 Err(Error::from(e))
             }
         }
@@ -161,7 +161,7 @@ impl WriteChannel {
 
     /// Clear unflused queued messages
     pub(crate) fn clear(&mut self) {
-        self.boundries.clear();
+        self.boundaries.clear();
         self.buf.clear();
     }
 
@@ -194,12 +194,12 @@ impl WriteChannel {
     /// otherwise false.
     pub(crate) fn try_flush(&mut self) -> Result<bool> {
         while self.buf.has_remaining() {
-            let boundry = self.boundries.first().copied().unwrap_or(self.buf.len());
+            let boundry = self.boundaries.first().copied().unwrap_or(self.buf.len());
             let chunk = self.buf.split_to(boundry);
             match self.to_flush.try_send(chunk) {
                 Ok(()) => {
-                    if self.boundries.len() > 0 {
-                        self.boundries.remove(0);
+                    if self.boundaries.len() > 0 {
+                        self.boundaries.remove(0);
                     }
                 }
                 Err(e) if e.is_full() => {
