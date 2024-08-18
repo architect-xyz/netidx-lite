@@ -3,13 +3,13 @@ use crate::{
     pool::Pool,
     protocol::*,
     socket_channel::{self, Channel, ReadChannel, WriteChannel},
-    try_continue,
+    try_continue, utils,
 };
 use anyhow::{anyhow, bail, Error, Result};
 use bytes::Bytes;
 use futures::{
     channel::{
-        mpsc::{Receiver, Sender, UnboundedSender},
+        mpsc::{channel, unbounded, Receiver, Sender, UnboundedSender},
         oneshot,
     },
     future,
@@ -38,8 +38,14 @@ use tokio::{
 };
 
 lazy_static! {
+    static ref TOPUB: Pool<HashSet<Path>> = Pool::new(10, 10_000);
+    static ref TOUPUB: Pool<HashSet<Path>> = Pool::new(5, 10_000);
+    static ref TOUSUB: Pool<HashMap<Id, Subscribed>> = Pool::new(5, 10_000);
+    static ref RAWBATCH: Pool<Vec<BatchMsg>> = Pool::new(100, 10_000);
     static ref UPDATES: Pool<Vec<ToSubscriber>> = Pool::new(100, 10_000);
     static ref RAWUNSUBS: Pool<Vec<(ClId, Id)>> = Pool::new(100, 10_000);
+    static ref UNSUBS: Pool<Vec<Id>> = Pool::new(100, 10_000);
+    static ref BATCH: Pool<FxHashMap<ClId, Update>> = Pool::new(100, 1000);
 
     // estokes 2021: This is reasonable because there will never be
     // that many publishers in a process. Since a publisher wraps
@@ -90,40 +96,23 @@ impl Val {
     ///
     /// Clients that subscribe after an update is queued, but before
     /// the batch is committed will still receive the update.
-    pub fn update<T: Pack>(&self, batch: &mut UpdateBatch, v: T) {
-        batch.updates.push(BatchMsg::Update(None, self.0, v.into()))
-    }
-
-    /// Same as update, except the argument can be TryInto<Value>
-    /// instead of Into<Value>
-    pub fn try_update<T: TryInto<Value>>(
-        &self,
-        batch: &mut UpdateBatch,
-        v: T,
-    ) -> result::Result<(), T::Error> {
-        Ok(batch.updates.push(BatchMsg::Update(None, self.0, v.try_into()?)))
-    }
-
-    /// update the current value only if the new value is different
-    /// from the existing one. Otherwise exactly the same as update.
-    pub fn update_changed<T: Pack>(&self, batch: &mut UpdateBatch, v: T) {
-        batch.updates.push(BatchMsg::UpdateChanged(self.0, v.into()))
+    pub fn update<T: Pack>(&self, batch: &mut UpdateBatch, v: &T) -> Result<()> {
+        let buf = utils::pack(v)?.freeze();
+        batch.updates.push(BatchMsg::Update(None, self.0, buf));
+        Ok(())
     }
 
     /// Queue sending `v` as an update ONLY to the specified
     /// subscriber, and do not update `current`.
-    pub fn update_subscriber<T: Pack>(&self, batch: &mut UpdateBatch, dst: ClId, v: T) {
-        batch.updates.push(BatchMsg::Update(Some(dst), self.0, v.into()));
-    }
-
-    /// Same as update_subscriber except the argument can be TryInto<Value>.
-    pub fn try_update_subscriber<T: Pack>(
+    pub fn update_subscriber<T: Pack>(
         &self,
         batch: &mut UpdateBatch,
         dst: ClId,
-        v: T,
-    ) -> result::Result<(), T::Error> {
-        Ok(batch.updates.push(BatchMsg::Update(Some(dst), self.0, v.try_into()?)))
+        v: &T,
+    ) -> Result<()> {
+        let buf = utils::pack(v)?.freeze();
+        batch.updates.push(BatchMsg::Update(Some(dst), self.0, buf));
+        Ok(())
     }
 
     /// Queue unsubscribing the specified client. Like update, this
@@ -145,6 +134,90 @@ impl Val {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum BatchMsg {
+    Update(Option<ClId>, Id, Bytes),
+}
+
+/// A batch of updates to Vals
+#[must_use = "update batches do nothing unless committed"]
+pub struct UpdateBatch {
+    origin: Publisher,
+    updates: Pooled<Vec<BatchMsg>>,
+    unsubscribes: Option<Pooled<Vec<(ClId, Id)>>>,
+}
+
+impl UpdateBatch {
+    /// return the number of queued updates in the batch
+    pub fn len(&self) -> usize {
+        self.updates.len()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &BatchMsg> {
+        self.updates.iter()
+    }
+
+    /// Commit this batch, triggering all queued values to be
+    /// sent. Any subscriber that can't accept all the updates within
+    /// `timeout` will be disconnected.
+    pub async fn commit(mut self, timeout: Option<Duration>) {
+        let empty = self.updates.is_empty()
+            && self.unsubscribes.as_ref().map(|v| v.len()).unwrap_or(0) == 0;
+        if empty {
+            return;
+        }
+        let fut = {
+            let mut batch = BATCH.take();
+            let mut pb = self.origin.0.lock();
+            for m in self.updates.drain(..) {
+                match m {
+                    BatchMsg::Update(None, id, v) => {
+                        if let Some(pbl) = pb.by_id.get_mut(&id) {
+                            for cl in pbl.subscribed.iter() {
+                                batch
+                                    .entry(*cl)
+                                    .or_insert_with(Update::new)
+                                    .updates
+                                    .push(ToSubscriber::Update(id, v.clone()));
+                            }
+                            pbl.current = v;
+                        }
+                    }
+                    BatchMsg::Update(Some(cl), id, v) => batch
+                        .entry(cl)
+                        .or_insert_with(Update::new)
+                        .updates
+                        .push(ToSubscriber::Update(id, v)),
+                }
+            }
+            if let Some(usubs) = &mut self.unsubscribes {
+                for (cl, id) in usubs.drain(..) {
+                    let update = batch.entry(cl).or_insert_with(Update::new);
+                    match &mut update.unsubscribes {
+                        Some(u) => u.push(id),
+                        None => {
+                            let mut u = UNSUBS.take();
+                            u.push(id);
+                            update.unsubscribes = Some(u);
+                        }
+                    }
+                }
+            }
+            future::join_all(
+                batch
+                    .drain()
+                    .filter_map(|(cl, batch)| {
+                        pb.clients.get(&cl).map(move |cl| (cl.msg_queue.clone(), batch))
+                    })
+                    .map(|(mut q, batch)| async move {
+                        let _: Result<_, _> = q.send((timeout, batch)).await;
+                    }),
+            )
+        };
+        fut.await;
+    }
+}
+
 /// Publish values. Publisher is internally wrapped in an Arc, so
 /// cloning it is virtually free. When all references to to the
 /// publisher have been dropped the publisher will shutdown the
@@ -157,8 +230,32 @@ impl Publisher {
         PublisherWeak(Arc::downgrade(&self.0))
     }
 
-    pub async fn new(bind: &str, slack: usize) -> Result<Self> {
-        // TODO
+    pub async fn new(bind: SocketAddr, slack: usize) -> Result<Self> {
+        let listener = TcpListener::bind(bind).await?;
+        let (stop, receive_stop) = oneshot::channel();
+        let (tx_trigger, rx_trigger) = unbounded();
+        let pb = Publisher(Arc::new(Mutex::new(PublisherInner {
+            addr: bind,
+            stop: Some(stop),
+            clients: HashMap::default(),
+            hc_subscribed: HashMap::default(),
+            by_path: HashMap::new(),
+            by_id: HashMap::default(),
+            advertised: HashMap::new(),
+            to_publish: TOPUB.take(),
+            to_unpublish: TOUPUB.take(),
+            to_unsubscribe: TOUSUB.take(),
+            publish_triggered: false,
+            trigger_publish: tx_trigger,
+        })));
+        task::spawn({
+            let pb_weak = pb.downgrade();
+            async move {
+                run(pb_weak.clone(), listener, receive_stop, slack).await;
+                info!("accept loop shutdown");
+            }
+        });
+        Ok(pb)
     }
 
     /// Publish `Path` with initial value `init` and flags `flags`. It
@@ -171,14 +268,12 @@ impl Publisher {
     /// If specified the write channel will be registered before the
     /// value is published, so there can be no race (however small)
     /// that might cause you to miss a write.
-    pub fn publish_with_flags_and_writes<T>(&self, path: Path, init: T) -> Result<Val>
+    pub fn publish<T>(&self, path: Path, init: T) -> Result<Val>
     where
         T: Pack,
     {
-        let init: Value = init.try_into()?;
+        let init: Bytes = utils::pack(&init)?.freeze();
         let id = Id::new();
-        let destroy_on_idle = flags.contains(PublishFlags::DESTROY_ON_IDLE);
-        flags.remove(PublishFlags::DESTROY_ON_IDLE);
         let mut pb = self.0.lock();
         pb.check_publish(&path)?;
         let subscribed = pb
@@ -190,14 +285,33 @@ impl Publisher {
             id,
             Published { current: init, subscribed, path: path.clone(), aliases: None },
         );
-        if destroy_on_idle {
-            pb.destroy_on_idle.insert(id);
-        }
-        if let Some(tx) = tx {
-            pb.writes(id, tx);
-        }
-        pb.publish(id, flags, path.clone());
+        pb.by_path.insert(path.clone(), id);
+        pb.to_unpublish.remove(&path);
+        pb.to_publish.insert(path.clone());
+        pb.trigger_publish();
         Ok(Val(id))
+    }
+
+    /// Start a new update batch. Updates are queued in the batch (see
+    /// `Val::update`), and then the batch can be either discarded, or
+    /// committed. If discarded then none of the updates will have any
+    /// effect, otherwise once committed the queued updates will be
+    /// sent out to subscribers and also will effect the current value
+    /// given to new subscribers.
+    ///
+    /// Multiple batches may be started concurrently.
+    pub fn start_batch(&self) -> UpdateBatch {
+        UpdateBatch { origin: self.clone(), updates: RAWBATCH.take(), unsubscribes: None }
+    }
+
+    /// Wait until all previous publish or unpublish commands have
+    /// been processed by the resolver server. e.g. if you just
+    /// published 100 values, and you want to know when they have been
+    /// uploaded to the resolver, you can call `flushed`.
+    pub async fn flushed(&self) {
+        let (tx, rx) = oneshot::channel();
+        let _: Result<_, _> = self.0.lock().trigger_publish.unbounded_send(Some(tx));
+        let _ = rx.await;
     }
 
     /// get the `SocketAddr` that publisher is bound to
@@ -299,6 +413,7 @@ struct PublisherInner {
     advertised: HashMap<Path, HashSet<Path>>,
     to_publish: Pooled<HashSet<Path>>,
     to_unpublish: Pooled<HashSet<Path>>,
+    to_unsubscribe: Pooled<HashMap<Id, Subscribed>>,
     publish_triggered: bool,
     trigger_publish: UnboundedSender<Option<oneshot::Sender<()>>>,
 }
@@ -348,6 +463,20 @@ impl PublisherInner {
             self.to_publish.remove(path);
             self.to_unpublish.insert(path.clone());
             self.trigger_publish();
+        }
+    }
+
+    fn destroy_val(&mut self, id: Id) {
+        if let Some(pbl) = self.by_id.remove(&id) {
+            let path = pbl.path;
+            for path in iter::once(&path).chain(pbl.aliases.iter().flat_map(|v| v.iter()))
+            {
+                self.unpublish(path)
+            }
+            // self.send_event(Event::Destroyed(id));
+            if pbl.subscribed.len() > 0 {
+                self.to_unsubscribe.insert(id, pbl.subscribed);
+            }
         }
     }
 
@@ -479,21 +608,6 @@ impl Update {
     }
 }
 
-pub async fn run(bind: &str) -> Result<()> {
-    let listener = TcpListener::bind(bind).await?;
-    loop {
-        match listener.accept().await {
-            Err(e) => error!("failed to accept connection: {e:?}"),
-            Ok((s, addr)) => {
-                debug!("accepted client: {addr:?}");
-                try_continue!("set nodelay", s.set_nodelay(true));
-            }
-        }
-    }
-    #[allow(unreachable_code)]
-    Ok(())
-}
-
 struct ClientCtx {
     publisher: PublisherWeak,
     client: ClId,
@@ -503,6 +617,16 @@ struct ClientCtx {
 }
 
 impl ClientCtx {
+    fn new(client: ClId, publisher: PublisherWeak) -> Self {
+        Self {
+            publisher,
+            client,
+            batch: Vec::new(),
+            flushing_updates: false,
+            flush_timeout: None,
+        }
+    }
+
     async fn hello(&mut self, mut con: TcpStream) -> Result<Channel> {
         // static NO: &str = "authentication mechanism not supported";
         debug!("hello_client");
@@ -554,6 +678,29 @@ impl ClientCtx {
         Ok(())
     }
 
+    fn handle_updates(
+        &mut self,
+        con: &mut WriteChannel,
+        (timeout, mut up): (Option<Duration>, Update),
+    ) -> Result<()> {
+        for m in up.updates.drain(..) {
+            con.queue_send(&m)?
+        }
+        if let Some(usubs) = &mut up.unsubscribes {
+            for id in usubs.drain(..) {
+                self.batch.push(ToPublisher::Unsubscribe(id));
+            }
+        }
+        if self.batch.len() > 0 {
+            self.handle_batch(con)?;
+        }
+        if con.bytes_queued() > 0 {
+            self.flushing_updates = true;
+            self.flush_timeout = timeout;
+        }
+        Ok(())
+    }
+
     pub async fn run(
         mut self,
         con: TcpStream,
@@ -570,16 +717,16 @@ impl ClientCtx {
                 future::pending().await
             }
         }
-        // async fn read_updates(
-        //     flushing: bool,
-        //     c: &mut Receiver<(Option<Duration>, Update)>,
-        // ) -> Option<(Option<Duration>, Update)> {
-        //     if flushing {
-        //         future::pending().await
-        //     } else {
-        //         c.next().await
-        //     }
-        // }
+        async fn read_updates(
+            flushing: bool,
+            c: &mut Receiver<(Option<Duration>, Update)>,
+        ) -> Option<(Option<Duration>, Update)> {
+            if flushing {
+                future::pending().await
+            } else {
+                c.next().await
+            }
+        }
         let mut hb = tokio::time::interval(HEARTBEAT_INTERVAL);
         let (mut read_con, mut write_con) =
             time::timeout(HELLO_TIMEOUT, self.hello(con)).await??.split();
@@ -599,12 +746,62 @@ impl ClientCtx {
                     r?;
                     self.handle_batch(&mut write_con)?;
                 }
-                // u = read_updates(self.flushing_updates, &mut updates).fuse() => {
-                //     match u {
-                //         None => break Ok(()),
-                //         Some(u) => self.handle_updates(&mut write_con, u)?,
-                //     }
-                // },
+                u = read_updates(self.flushing_updates, &mut updates).fuse() => {
+                    match u {
+                        None => break Ok(()),
+                        Some(u) => self.handle_updates(&mut write_con, u)?,
+                    }
+                },
+            }
+        }
+    }
+}
+
+pub async fn run(
+    t: PublisherWeak,
+    listener: TcpListener,
+    stop: oneshot::Receiver<()>,
+    slack: usize,
+) {
+    let mut stop = stop.fuse();
+    loop {
+        select_biased! {
+            _ = stop => break,
+            cl = listener.accept().fuse() => match cl {
+                Err(e) => error!("failed to accept connection: {e:?}"),
+                Ok((s, addr)) => {
+                    debug!("accepted client: {addr:?}");
+                    try_continue!("set nodelay", s.set_nodelay(true));
+                    let clid = ClId::new();
+                    let t_weak = t.clone();
+                    let t = match t.upgrade() {
+                        None => return,
+                        Some(t) => t
+                    };
+                    let mut pb = t.0.lock();
+                    let (tx, rx) = channel(slack);
+                    pb.clients.insert(clid, PublisherClient {
+                        msg_queue: tx,
+                        subscribed: HashSet::default(),
+                        auth: None,
+                    });
+                    task::spawn(async move {
+                        let ctx = ClientCtx::new(clid, t_weak.clone());
+                        let r = ctx.run(s, rx).await;
+                        info!("accept_loop client shutdown {:?}", r);
+                        if let Some(t) = t_weak.upgrade() {
+                            let mut pb = t.0.lock();
+                            if let Some(cl) = pb.clients.remove(&clid) {
+                                for id in cl.subscribed {
+                                    pb.unsubscribe(clid, id);
+                                }
+                                pb.hc_subscribed.retain(|_, v| {
+                                    Arc::get_mut(v).is_none()
+                                });
+                            }
+                        }
+                    });
+                }
             }
         }
     }

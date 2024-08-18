@@ -96,6 +96,7 @@ thread_local! {
     static BUF: RefCell<BytesMut> = RefCell::new(BytesMut::with_capacity(512));
 }
 
+// TODO: move to pack crate
 /// pack-derive T and return a bytesmut from the global thread local buffer
 pub fn pack<T: Pack>(t: &T) -> Result<BytesMut, PackError> {
     BUF.with(|buf| {
