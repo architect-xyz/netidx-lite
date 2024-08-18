@@ -2,9 +2,13 @@ use crate::{atomic_id, pack::Pack, path::Path};
 use arcstr::ArcStr;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+pub const MAGIC: u64 = 4;
+pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+pub const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 
 atomic_id!(Id);
-atomic_id!(ClId);
 
 #[derive(Clone, Debug)]
 pub struct AuthInfo {
@@ -40,8 +44,8 @@ pub enum ToPublisher {
     /// in an Unsubscribed message even if you weren't ever subscribed
     /// to the value, or it doesn't exist.
     Unsubscribe(Id),
-    // Request,
-    // Response,
+    // Request(Uuid or client-side id, Path, Bytes),
+    // Response(Uuid, Bytes),
 }
 
 #[derive(Debug, Clone, PartialEq, Pack)]
@@ -72,10 +76,3 @@ pub enum ToSubscriber {
 // TODO: i like client/server distinction because its clear whose message what
 // but it would be nice to establish a conn then reverse the directionality, for
 // certain use cases. should provide a mechanism for that
-
-#[derive(Debug, Clone, Copy)]
-pub enum Event {
-    Destroyed(Id),
-    Subscribe(Id, ClId),
-    Unsubscribe(Id, ClId),
-}

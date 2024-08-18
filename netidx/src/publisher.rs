@@ -1,4 +1,5 @@
 use crate::{
+    atomic_id,
     path::Path,
     pool::Pool,
     protocol::*,
@@ -9,7 +10,9 @@ use anyhow::{anyhow, bail, Error, Result};
 use bytes::Bytes;
 use futures::{
     channel::{
-        mpsc::{channel, unbounded, Receiver, Sender, UnboundedSender},
+        mpsc::{
+            channel, unbounded, Receiver, Sender, UnboundedReceiver, UnboundedSender,
+        },
         oneshot,
     },
     future,
@@ -37,6 +40,8 @@ use tokio::{
     task, time,
 };
 
+atomic_id!(ClId);
+
 lazy_static! {
     static ref TOPUB: Pool<HashSet<Path>> = Pool::new(10, 10_000);
     static ref TOUPUB: Pool<HashSet<Path>> = Pool::new(5, 10_000);
@@ -62,10 +67,6 @@ lazy_static! {
     // memory.
     static ref PUBLISHERS: Mutex<Vec<PublisherWeak>> = Mutex::new(Vec::new());
 }
-
-const MAGIC: u64 = 4;
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
-const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// This represents a published value. When it is dropped the value
 /// will be unpublished.
@@ -233,7 +234,6 @@ impl Publisher {
     pub async fn new(bind: SocketAddr, slack: usize) -> Result<Self> {
         let listener = TcpListener::bind(bind).await?;
         let (stop, receive_stop) = oneshot::channel();
-        let (tx_trigger, rx_trigger) = unbounded();
         let pb = Publisher(Arc::new(Mutex::new(PublisherInner {
             addr: bind,
             stop: Some(stop),
@@ -241,12 +241,7 @@ impl Publisher {
             hc_subscribed: HashMap::default(),
             by_path: HashMap::new(),
             by_id: HashMap::default(),
-            advertised: HashMap::new(),
-            to_publish: TOPUB.take(),
-            to_unpublish: TOUPUB.take(),
             to_unsubscribe: TOUSUB.take(),
-            publish_triggered: false,
-            trigger_publish: tx_trigger,
         })));
         task::spawn({
             let pb_weak = pb.downgrade();
@@ -255,6 +250,14 @@ impl Publisher {
                 info!("accept loop shutdown");
             }
         });
+        // task::spawn({
+        //     let pb_weak = pb.downgrade();
+        //     async move {
+        //         publish_loop(pb_weak).await;
+        //         info!("publish loop shutdown")
+        //     }
+        // });
+        PUBLISHERS.lock().push(pb.downgrade());
         Ok(pb)
     }
 
@@ -286,9 +289,6 @@ impl Publisher {
             Published { current: init, subscribed, path: path.clone(), aliases: None },
         );
         pb.by_path.insert(path.clone(), id);
-        pb.to_unpublish.remove(&path);
-        pb.to_publish.insert(path.clone());
-        pb.trigger_publish();
         Ok(Val(id))
     }
 
@@ -309,9 +309,9 @@ impl Publisher {
     /// published 100 values, and you want to know when they have been
     /// uploaded to the resolver, you can call `flushed`.
     pub async fn flushed(&self) {
-        let (tx, rx) = oneshot::channel();
-        let _: Result<_, _> = self.0.lock().trigger_publish.unbounded_send(Some(tx));
-        let _ = rx.await;
+        // let (tx, rx) = oneshot::channel();
+        // let _: Result<_, _> = self.0.lock().trigger_publish.unbounded_send(Some(tx));
+        // let _ = rx.await;
     }
 
     /// get the `SocketAddr` that publisher is bound to
@@ -341,7 +341,6 @@ impl Publisher {
         }
     }
 
-    // TODO: return ref instead
     /// Get a copy of the current value of a published `Val`
     pub fn current(&self, id: &Id) -> Option<Bytes> {
         self.0.lock().by_id.get(&id).map(|p| p.current.clone())
@@ -357,14 +356,6 @@ impl Publisher {
             .unwrap_or_else(Vec::new)
     }
 
-    /// Put the list of clients subscribed to a published `Val` into
-    /// the specified collection.
-    pub fn put_subscribed(&self, id: &Id, into: &mut impl Extend<ClId>) {
-        if let Some(p) = self.0.lock().by_id.get(&id) {
-            into.extend(p.subscribed.iter().copied())
-        }
-    }
-
     /// Return true if the specified client is subscribed to the
     /// specifed Id.
     pub fn is_subscribed(&self, id: &Id, client: &ClId) -> bool {
@@ -374,22 +365,15 @@ impl Publisher {
         }
     }
 
-    /// Return the auth information associated with the specified
-    /// client id. If the authentication mechanism is Krb5 then this
-    /// will be the remote user's user principal name,
-    /// e.g. eric@RYU-OH.ORG on posix systems. If the auth mechanism
-    /// is tls, then this will be the common name of the user's
-    /// certificate. If the authentication mechanism is Local then
-    /// this will be the local user name.
-    ///
-    /// This will always be None if the auth mechanism is Anonymous.
-    pub fn auth_info(&self, client: &ClId) -> Option<AuthInfo> {
-        self.0.lock().clients.get(client).and_then(|c| c.auth.clone())
-    }
-
     /// Get the number of clients subscribed to a published `Val`
     pub fn subscribed_len(&self, id: &Id) -> usize {
         self.0.lock().by_id.get(&id).map(|p| p.subscribed.len()).unwrap_or(0)
+    }
+
+    /// Return the auth information associated with the specified
+    /// client id.
+    pub fn auth_info(&self, client: &ClId) -> Option<AuthInfo> {
+        self.0.lock().clients.get(client).and_then(|c| c.auth.clone())
     }
 }
 
@@ -410,12 +394,7 @@ struct PublisherInner {
     hc_subscribed: FxHashMap<BTreeSet<ClId>, Subscribed>,
     by_path: HashMap<Path, Id>,
     by_id: FxHashMap<Id, Published>,
-    advertised: HashMap<Path, HashSet<Path>>,
-    to_publish: Pooled<HashSet<Path>>,
-    to_unpublish: Pooled<HashSet<Path>>,
     to_unsubscribe: Pooled<HashMap<Id, Subscribed>>,
-    publish_triggered: bool,
-    trigger_publish: UnboundedSender<Option<oneshot::Sender<()>>>,
 }
 
 impl PublisherInner {
@@ -431,12 +410,6 @@ impl PublisherInner {
         }
     }
 
-    fn is_advertised(&self, path: &Path) -> bool {
-        self.advertised
-            .iter()
-            .any(|(b, set)| Path::is_parent(&**b, &**path) && set.contains(path))
-    }
-
     pub fn check_publish(&self, path: &Path) -> Result<()> {
         if !Path::is_absolute(&path) {
             bail!("can't publish a relative path")
@@ -450,20 +423,12 @@ impl PublisherInner {
         Ok(())
     }
 
-    pub fn publish(&mut self, id: Id, path: Path) {
+    fn publish(&mut self, id: Id, path: Path) {
         self.by_path.insert(path.clone(), id);
-        self.to_unpublish.remove(&path);
-        self.to_publish.insert(path.clone());
-        self.trigger_publish();
     }
 
     fn unpublish(&mut self, path: &Path) {
         self.by_path.remove(path);
-        if !self.is_advertised(path) {
-            self.to_publish.remove(path);
-            self.to_unpublish.insert(path.clone());
-            self.trigger_publish();
-        }
     }
 
     fn destroy_val(&mut self, id: Id) {
@@ -473,17 +438,9 @@ impl PublisherInner {
             {
                 self.unpublish(path)
             }
-            // self.send_event(Event::Destroyed(id));
             if pbl.subscribed.len() > 0 {
                 self.to_unsubscribe.insert(id, pbl.subscribed);
             }
-        }
-    }
-
-    fn trigger_publish(&mut self) {
-        if !self.publish_triggered {
-            self.publish_triggered = true;
-            let _: Result<_, _> = self.trigger_publish.unbounded_send(None);
         }
     }
 
@@ -516,7 +473,6 @@ impl PublisherInner {
                 // TODO: don't clone via ToSubscriber<'a>
                 let m = ToSubscriber::Subscribed(path, id, ut.current.clone());
                 con.queue_send(&m)?;
-                // t.send_event(Event::Subscribe(id, client));
             }
             // TODO: missing a NoSuchValue case?
         } else {
@@ -551,8 +507,13 @@ impl PublisherInner {
             if let Some(cl) = self.clients.get_mut(&client) {
                 cl.subscribed.remove(&id);
             }
-            // t.send_event(Event::Unsubscribe(id, client));
         }
+    }
+}
+
+impl Drop for PublisherInner {
+    fn drop(&mut self) {
+        self.cleanup();
     }
 }
 
@@ -740,8 +701,6 @@ impl ClientCtx {
                 _ = hb.tick().fuse() => {
                     write_con.queue_send(&ToSubscriber::Heartbeat)?;
                 },
-                // s = self.deferred_subs.next() =>
-                //     self.handle_deferred_sub(&mut write_con, s)?,
                 r = read_con.receive_batch(&mut self.batch).fuse() => {
                     r?;
                     self.handle_batch(&mut write_con)?;
@@ -806,3 +765,37 @@ pub async fn run(
         }
     }
 }
+
+// async fn publish_loop(
+//     publisher: PublisherWeak,
+//     mut trigger_rx: UnboundedReceiver<Option<oneshot::Sender<()>>>,
+// ) {
+//     while let Some(reply) = trigger_rx.next().await {
+//         if let Some(publisher) = publisher.upgrade() {
+//             let mut to_unsubscribe;
+//             {
+//                 let mut pb = publisher.0.lock();
+//                 // TODO: once we're done with the embedded resolver,
+//                 // consider whether we really care about these fields
+//                 pb.to_publish.clear();
+//                 pb.to_unpublish.clear();
+//                 to_unsubscribe = mem::replace(&mut pb.to_unsubscribe, TOUSUB.take());
+//                 pb.publish_triggered = false;
+//             };
+//             if to_unsubscribe.len() > 0 {
+//                 let mut usubs = RAWUNSUBS.take();
+//                 for (id, subs) in to_unsubscribe.drain() {
+//                     for cl in subs.iter() {
+//                         usubs.push((*cl, id));
+//                     }
+//                 }
+//                 let mut batch = publisher.start_batch();
+//                 batch.unsubscribes = Some(usubs);
+//                 batch.commit(None).await;
+//             }
+//         }
+//         if let Some(reply) = reply {
+//             let _ = reply.send(());
+//         }
+//     }
+// }

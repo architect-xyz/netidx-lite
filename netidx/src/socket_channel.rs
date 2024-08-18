@@ -39,7 +39,7 @@ const ENC_MASK: u32 = 0x80000000;
 /// Send a single unencrypted message directly to the specified
 /// socket. This is intended to be used to do some initialization
 /// before the proper channel can be created.
-pub(crate) async fn write_raw<T: Pack, S: AsyncWrite + Unpin>(
+pub async fn write_raw<T: Pack, S: AsyncWrite + Unpin>(
     socket: &mut S,
     msg: &T,
 ) -> Result<()> {
@@ -61,7 +61,7 @@ pub(crate) async fn write_raw<T: Pack, S: AsyncWrite + Unpin>(
 /// Read a single, small, unencrypted message from the specified
 /// socket. This is intended to be used to do some initialization
 /// before the proper channel can be created.
-pub(crate) async fn read_raw<T: Pack, S: AsyncRead + Unpin>(socket: &mut S) -> Result<T> {
+pub async fn read_raw<T: Pack, S: AsyncRead + Unpin>(socket: &mut S) -> Result<T> {
     const MAX: usize = 1024;
     let mut buf = [0u8; MAX];
     socket.read_exact(&mut buf[0..4]).await?;
@@ -117,16 +117,14 @@ fn flush_task<S: AsyncWrite + Send + 'static>(mut soc: WriteHalf<S>) -> Sender<B
     tx
 }
 
-pub(crate) struct WriteChannel {
+pub struct WriteChannel {
     to_flush: Sender<BytesMut>,
     buf: BytesMut,
     boundaries: Vec<usize>,
 }
 
 impl WriteChannel {
-    pub(crate) fn new<S: AsyncWrite + Send + 'static>(
-        socket: WriteHalf<S>,
-    ) -> WriteChannel {
+    pub fn new<S: AsyncWrite + Send + 'static>(socket: WriteHalf<S>) -> WriteChannel {
         WriteChannel {
             to_flush: flush_task(socket),
             buf: BytesMut::with_capacity(BUF),
@@ -136,7 +134,7 @@ impl WriteChannel {
 
     /// Queue a message for sending. This only encodes the message and
     /// writes it to the buffer, you must call flush actually send it.
-    pub(crate) fn queue_send<T: Pack>(&mut self, msg: &T) -> Result<()> {
+    pub fn queue_send<T: Pack>(&mut self, msg: &T) -> Result<()> {
         let len = msg.encoded_len();
         if len > MAX_BATCH as usize {
             return Err(anyhow!("message length {} exceeds max size {}", len, MAX_BATCH));
@@ -159,27 +157,27 @@ impl WriteChannel {
         }
     }
 
-    /// Clear unflused queued messages
-    pub(crate) fn clear(&mut self) {
+    /// Clear unflushed queued messages
+    pub fn clear(&mut self) {
         self.boundaries.clear();
         self.buf.clear();
     }
 
     /// Queue and flush one message.
-    pub(crate) async fn send_one<T: Pack>(&mut self, msg: &T) -> Result<()> {
+    pub async fn send_one<T: Pack>(&mut self, msg: &T) -> Result<()> {
         self.queue_send(msg)?;
         Ok(self.flush().await?)
     }
 
     /// Return the number of bytes queued for sending.
-    pub(crate) fn bytes_queued(&self) -> usize {
+    pub fn bytes_queued(&self) -> usize {
         self.buf.remaining()
     }
 
     /// Initiate sending all outgoing messages. The actual send will
     /// be done on a background task. If there is sufficient room in
     /// the buffer flush will complete immediately.
-    pub(crate) async fn flush(&mut self) -> Result<()> {
+    pub async fn flush(&mut self) -> Result<()> {
         loop {
             if self.try_flush()? {
                 break Ok(());
@@ -192,7 +190,7 @@ impl WriteChannel {
     /// Flush as much data as possible now, but don't wait if the
     /// channel is full. Return true if all data was flushed,
     /// otherwise false.
-    pub(crate) fn try_flush(&mut self) -> Result<bool> {
+    pub fn try_flush(&mut self) -> Result<bool> {
         while self.buf.has_remaining() {
             let boundry = self.boundaries.first().copied().unwrap_or(self.buf.len());
             let chunk = self.buf.split_to(boundry);
@@ -217,7 +215,7 @@ impl WriteChannel {
     /// Initiate sending all outgoing messages and wait `timeout` for
     /// the operation to complete. If `timeout` expires some data may
     /// have been sent.
-    pub(crate) async fn flush_timeout(&mut self, timeout: Duration) -> Result<()> {
+    pub async fn flush_timeout(&mut self, timeout: Duration) -> Result<()> {
         Ok(time::timeout(timeout, self.flush()).await??)
     }
 }
@@ -395,14 +393,14 @@ fn read_task<S: AsyncRead + Send + 'static>(
     rx
 }
 
-pub(crate) struct ReadChannel {
+pub struct ReadChannel {
     buf: PBuf,
     _stop: oneshot::Sender<()>,
     incoming: stream::Fuse<Receiver<PBuf>>,
 }
 
 impl ReadChannel {
-    pub(crate) fn new<S: AsyncRead + Send + 'static>(socket: ReadHalf<S>) -> ReadChannel {
+    pub fn new<S: AsyncRead + Send + 'static>(socket: ReadHalf<S>) -> ReadChannel {
         let (stop_tx, stop_rx) = oneshot::channel();
         ReadChannel {
             buf: PBuf::default(),
@@ -412,7 +410,7 @@ impl ReadChannel {
     }
 
     /// Read a load of bytes from the socket into the read buffer
-    pub(crate) async fn fill_buffer(&mut self) -> Result<()> {
+    pub async fn fill_buffer(&mut self) -> Result<()> {
         if let Some(chunk) = self.incoming.next().await {
             self.buf = chunk;
             Ok(())
@@ -421,7 +419,7 @@ impl ReadChannel {
         }
     }
 
-    pub(crate) async fn receive<T: Pack + Debug>(&mut self) -> Result<T> {
+    pub async fn receive<T: Pack + Debug>(&mut self) -> Result<T> {
         if !self.buf.has_remaining() {
             self.fill_buffer().await?;
         }
@@ -430,7 +428,7 @@ impl ReadChannel {
         Ok(res?)
     }
 
-    pub(crate) async fn receive_batch<T: Pack + Debug>(
+    pub async fn receive_batch<T: Pack + Debug>(
         &mut self,
         batch: &mut Vec<T>,
     ) -> Result<()> {
@@ -448,7 +446,7 @@ impl ReadChannel {
         Ok::<_, anyhow::Error>(())
     }
 
-    pub(crate) async fn receive_batch_fn<T, F>(&mut self, mut f: F) -> Result<()>
+    pub async fn receive_batch_fn<T, F>(&mut self, mut f: F) -> Result<()>
     where
         T: Pack + Debug,
         F: FnMut(T),
@@ -468,63 +466,63 @@ impl ReadChannel {
     }
 }
 
-pub(crate) struct Channel {
+pub struct Channel {
     read: ReadChannel,
     write: WriteChannel,
 }
 
 impl Channel {
-    pub(crate) fn new<S: AsyncRead + AsyncWrite + Send + 'static>(socket: S) -> Channel {
+    pub fn new<S: AsyncRead + AsyncWrite + Send + 'static>(socket: S) -> Channel {
         let (rh, wh) = io::split(socket);
         Channel { read: ReadChannel::new(rh), write: WriteChannel::new(wh) }
     }
 
-    pub(crate) fn split(self) -> (ReadChannel, WriteChannel) {
+    pub fn split(self) -> (ReadChannel, WriteChannel) {
         (self.read, self.write)
     }
 
-    pub(crate) fn queue_send<T: Pack>(&mut self, msg: &T) -> Result<(), Error> {
+    pub fn queue_send<T: Pack>(&mut self, msg: &T) -> Result<(), Error> {
         self.write.queue_send(msg)
     }
 
-    pub(crate) fn clear(&mut self) {
+    pub fn clear(&mut self) {
         self.write.clear();
     }
 
-    pub(crate) async fn send_one<T: Pack>(&mut self, msg: &T) -> Result<(), Error> {
+    pub async fn send_one<T: Pack>(&mut self, msg: &T) -> Result<(), Error> {
         self.write.send_one(msg).await
     }
 
     #[allow(dead_code)]
-    pub(crate) fn bytes_queued(&self) -> usize {
+    pub fn bytes_queued(&self) -> usize {
         self.write.bytes_queued()
     }
 
-    pub(crate) async fn flush(&mut self) -> Result<(), Error> {
+    pub async fn flush(&mut self) -> Result<(), Error> {
         Ok(self.write.flush().await?)
     }
 
     #[allow(dead_code)]
-    pub(crate) fn try_flush(&mut self) -> Result<bool> {
+    pub fn try_flush(&mut self) -> Result<bool> {
         self.write.try_flush()
     }
 
-    pub(crate) async fn flush_timeout(&mut self, timeout: Duration) -> Result<(), Error> {
+    pub async fn flush_timeout(&mut self, timeout: Duration) -> Result<(), Error> {
         self.write.flush_timeout(timeout).await
     }
 
-    pub(crate) async fn receive<T: Pack + Debug>(&mut self) -> Result<T, Error> {
+    pub async fn receive<T: Pack + Debug>(&mut self) -> Result<T, Error> {
         self.read.receive().await
     }
 
-    pub(crate) async fn receive_batch<T: Pack + Debug>(
+    pub async fn receive_batch<T: Pack + Debug>(
         &mut self,
         batch: &mut Vec<T>,
     ) -> Result<(), Error> {
         self.read.receive_batch(batch).await
     }
 
-    pub(crate) async fn receive_batch_fn<T, F>(&mut self, f: F) -> Result<()>
+    pub async fn receive_batch_fn<T, F>(&mut self, f: F) -> Result<()>
     where
         T: Pack + Debug,
         F: FnMut(T),
